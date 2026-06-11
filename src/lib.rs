@@ -21,6 +21,7 @@ pub struct PackageManager {
     root: PathBuf,
     packages: PathBuf,
     trusted_keys: Vec<VerifyingKey>,
+    allow_unsigned: bool,
     index_cache: Arc<Mutex<HashMap<Url, Index>>>,
 }
 
@@ -34,6 +35,7 @@ impl PackageManager {
             root: PathBuf::from("."),
             packages: PathBuf::from("./packages"),
             trusted_keys: Vec::new(),
+            allow_unsigned: false,
             index_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -73,6 +75,12 @@ impl PackageManager {
 
         self.trusted_keys.push(verifying_key);
         Ok(())
+    }
+
+    /// Sets whether unsigned packages are allowed.
+    /// WARNING: This should only be set to `true` if you trust the repository and know the packages are signed.
+    pub fn set_allow_unsigned(&mut self, allow: bool) {
+        self.allow_unsigned = allow;
     }
 
     /// Adds a new repository to the list.
@@ -138,6 +146,7 @@ impl PackageManager {
                     package_name,
                     dest,
                     &self.trusted_keys,
+                    self.allow_unsigned,
                 )
                 .await;
             }

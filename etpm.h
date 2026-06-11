@@ -76,6 +76,12 @@ char* etpm_get_last_error(EtpmManager* manager);
 // Frees a string allocated by the ETPM library.
 void etpm_free_string(char* str);
 
+// Adds a trusted key for package signature verification.
+void etpm_add_trusted_key(EtpmManager* manager, const char* key);
+
+// Enables or disables the requirement for package signature verification (1 = true, 0 = false).
+EtpmStatus etpm_set_allow_unsigned(EtpmManager* manager, int allow);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,17 +1,15 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_int};
 use std::sync::Mutex;
 use tokio::runtime::Runtime;
 
 use crate::{PackageManager, TpmError};
 
-/// Opaque pointer for C. C code will only see this as a handle.
 pub struct EtpmManager {
     manager: PackageManager,
     runtime: Runtime,
     last_error: Mutex<Option<String>>,
 }
 
-/// Status codes returned by FFI functions.
 #[repr(C)]
 #[allow(dead_code)]
 pub enum EtpmStatus {
@@ -46,7 +44,6 @@ impl From<&TpmError> for EtpmStatus {
     }
 }
 
-/// Helper to safely convert C string to Rust &str
 fn c_str_to_str<'a>(c_str: *const c_char) -> Result<&'a str, EtpmStatus> {
     if c_str.is_null() {
         return Err(EtpmStatus::EtpmErrNullPtr);
@@ -58,8 +55,6 @@ fn c_str_to_str<'a>(c_str: *const c_char) -> Result<&'a str, EtpmStatus> {
     }
 }
 
-/// Creates a new ETPM manager.
-/// Returns a pointer to the manager, or null on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_manager_new() -> *mut EtpmManager {
     let runtime = match Runtime::new() {
@@ -76,7 +71,6 @@ pub extern "C" fn etpm_manager_new() -> *mut EtpmManager {
     Box::into_raw(manager)
 }
 
-/// Frees the memory associated with the ETPM manager.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_manager_free(ptr: *mut EtpmManager) {
     if !ptr.is_null() {
@@ -86,13 +80,11 @@ pub extern "C" fn etpm_manager_free(ptr: *mut EtpmManager) {
     }
 }
 
-/// Sets the root directory for package installation.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_set_root(ptr: *mut EtpmManager, path: *const c_char) -> EtpmStatus {
     if ptr.is_null() {
         return EtpmStatus::EtpmErrNullPtr;
     }
-
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(path) {
         Ok(p) => match manager.manager.set_root(p) {
@@ -106,13 +98,11 @@ pub extern "C" fn etpm_set_root(ptr: *mut EtpmManager, path: *const c_char) -> E
     }
 }
 
-/// Sets the packages directory for metadata storage.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_set_packages(ptr: *mut EtpmManager, path: *const c_char) -> EtpmStatus {
     if ptr.is_null() {
         return EtpmStatus::EtpmErrNullPtr;
     }
-
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(path) {
         Ok(p) => match manager.manager.set_packages(p) {
@@ -126,13 +116,11 @@ pub extern "C" fn etpm_set_packages(ptr: *mut EtpmManager, path: *const c_char) 
     }
 }
 
-/// Adds a repository URL.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_add_repository(ptr: *mut EtpmManager, url: *const c_char) -> EtpmStatus {
     if ptr.is_null() {
         return EtpmStatus::EtpmErrNullPtr;
     }
-
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(url) {
         Ok(u) => match manager.manager.add_repository(u) {
@@ -146,9 +134,39 @@ pub extern "C" fn etpm_add_repository(ptr: *mut EtpmManager, url: *const c_char)
     }
 }
 
-/// Fetches a package.
-/// `out_path` will be set to a newly allocated string containing the downloaded file path.
-/// The caller MUST free this string using `etpm_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn etpm_add_trusted_key(
+    ptr: *mut EtpmManager,
+    key_base64: *const c_char,
+) -> EtpmStatus {
+    if ptr.is_null() {
+        return EtpmStatus::EtpmErrNullPtr;
+    }
+    let manager = unsafe { &mut *ptr };
+    match c_str_to_str(key_base64) {
+        Ok(k) => match manager.manager.add_trusted_key(k) {
+            Ok(_) => EtpmStatus::EtpmOk,
+            Err(e) => {
+                *manager.last_error.lock().unwrap() = Some(e.to_string());
+                (&e).into()
+            }
+        },
+        Err(e) => e,
+    }
+}
+
+/// Enables or disables the requirement for package signature verification.
+/// `allow` should be 1 (true) or 0 (false).
+#[unsafe(no_mangle)]
+pub extern "C" fn etpm_set_allow_unsigned(ptr: *mut EtpmManager, allow: c_int) -> EtpmStatus {
+    if ptr.is_null() {
+        return EtpmStatus::EtpmErrNullPtr;
+    }
+    let manager = unsafe { &mut *ptr };
+    manager.manager.set_allow_unsigned(allow != 0);
+    EtpmStatus::EtpmOk
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_fetch_package(
     ptr: *mut EtpmManager,
@@ -188,7 +206,6 @@ pub extern "C" fn etpm_fetch_package(
     }
 }
 
-/// Installs a package from a local archive path.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_install_package(
     ptr: *mut EtpmManager,
@@ -223,7 +240,6 @@ pub extern "C" fn etpm_install_package(
     }
 }
 
-/// Uninstalls a package.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_uninstall_package(
     ptr: *mut EtpmManager,
@@ -253,7 +269,6 @@ pub extern "C" fn etpm_uninstall_package(
     }
 }
 
-/// Frees a string allocated by the FFI (e.g., from etpm_fetch_package or etpm_get_last_error).
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
@@ -263,9 +278,6 @@ pub extern "C" fn etpm_free_string(ptr: *mut c_char) {
     }
 }
 
-/// Retrieves the last error message.
-/// Returns a newly allocated string that MUST be freed with `etpm_free_string`.
-/// Returns null if there is no error or if ptr is null.
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_get_last_error(ptr: *mut EtpmManager) -> *mut c_char {
     if ptr.is_null() {
@@ -276,28 +288,5 @@ pub extern "C" fn etpm_get_last_error(ptr: *mut EtpmManager) -> *mut c_char {
     match guard.as_ref() {
         Some(err) => CString::new(err.clone()).unwrap().into_raw(),
         None => std::ptr::null_mut(),
-    }
-}
-
-/// Adds a trusted Ed25519 public key (Base64 encoded) for signature verification.
-#[unsafe(no_mangle)]
-pub extern "C" fn etpm_add_trusted_key(
-    ptr: *mut EtpmManager,
-    key_base64: *const c_char,
-) -> EtpmStatus {
-    if ptr.is_null() {
-        return EtpmStatus::EtpmErrNullPtr;
-    }
-
-    let manager = unsafe { &mut *ptr };
-    match c_str_to_str(key_base64) {
-        Ok(k) => match manager.manager.add_trusted_key(k) {
-            Ok(_) => EtpmStatus::EtpmOk,
-            Err(e) => {
-                *manager.last_error.lock().unwrap() = Some(e.to_string());
-                (&e).into()
-            }
-        },
-        Err(e) => e,
     }
 }

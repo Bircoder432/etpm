@@ -60,6 +60,7 @@ pub async fn download_package(
     package_name: &str,
     destination: &Path,
     trusted_keys: &[VerifyingKey],
+    allow_unsigned: bool,
 ) -> Result<PathBuf, TpmError> {
     let pkg_url = repository.join(&package.url)?;
     let sig_url = repository.join(&format!("{}.sig", package.url))?;
@@ -88,36 +89,41 @@ pub async fn download_package(
     drop(file);
 
     if trusted_keys.is_empty() {
-        tokio::fs::remove_file(&temp_pkg_path).await?;
-        return Err(TpmError::Repository(
-            "No trusted keys configured for signature verification".into(),
-        ));
-    }
-
-    let sig_response = reqwest::get(sig_url).await?;
-    if !sig_response.status().is_success() {
-        tokio::fs::remove_file(&temp_pkg_path).await?;
-        return Err(TpmError::InvalidSignature);
-    }
-    let sig_text = sig_response.text().await?;
-    let sig_bytes =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, sig_text.trim())
-            .map_err(|_| TpmError::InvalidSignature)?;
-
-    let signature =
-        Signature::try_from(sig_bytes.as_slice()).map_err(|_| TpmError::InvalidSignature)?;
-
-    let mut signature_valid = false;
-    for key in trusted_keys {
-        if key.verify(&file_bytes, &signature).is_ok() {
-            signature_valid = true;
-            break;
+        if allow_unsigned {
+            eprintln!("Warning: Signature verification skipped (allow_unsigned mode).");
+        } else {
+            tokio::fs::remove_file(&temp_pkg_path).await?;
+            return Err(TpmError::Repository(
+                "No trusted keys configured for signature verification".into(),
+            ));
         }
-    }
+    } else {
+        let sig_response = reqwest::get(sig_url).await?;
+        if !sig_response.status().is_success() {
+            tokio::fs::remove_file(&temp_pkg_path).await?;
+            return Err(TpmError::InvalidSignature);
+        }
 
-    if !signature_valid {
-        tokio::fs::remove_file(&temp_pkg_path).await?;
-        return Err(TpmError::InvalidSignature);
+        let sig_text = sig_response.text().await?;
+        let sig_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, sig_text.trim())
+                .map_err(|_| TpmError::InvalidSignature)?;
+
+        let signature =
+            Signature::try_from(sig_bytes.as_slice()).map_err(|_| TpmError::InvalidSignature)?;
+
+        let mut signature_valid = false;
+        for key in trusted_keys {
+            if key.verify(&file_bytes, &signature).is_ok() {
+                signature_valid = true;
+                break;
+            }
+        }
+
+        if !signature_valid {
+            tokio::fs::remove_file(&temp_pkg_path).await?;
+            return Err(TpmError::InvalidSignature);
+        }
     }
 
     tokio::fs::rename(&temp_pkg_path, &final_pkg_path).await?;

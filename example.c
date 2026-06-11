@@ -35,6 +35,8 @@ int main() {
         print_error(manager, "add_repository");
         return 1;
     }
+
+    etpm_set_allow_unsigned(manager, 1);
     printf("Repository added successfully.\n");
 
     // 3. Fetch package
