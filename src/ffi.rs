@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use tokio::runtime::Runtime;
 
 use crate::{PackageManager, TpmError};
+use tracing::{debug, error, info};
 
 pub struct EtpmManager {
     manager: PackageManager,
@@ -57,9 +58,13 @@ fn c_str_to_str<'a>(c_str: *const c_char) -> Result<&'a str, EtpmStatus> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_manager_new() -> *mut EtpmManager {
+    info!("FFI: Creating EtpmManager");
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
-        Err(_) => return std::ptr::null_mut(),
+        Err(e) => {
+            error!("FFI: Failed to create Tokio runtime: {:?}", e);
+            return std::ptr::null_mut();
+        }
     };
 
     let manager = Box::new(EtpmManager {
@@ -73,10 +78,13 @@ pub extern "C" fn etpm_manager_new() -> *mut EtpmManager {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_manager_free(ptr: *mut EtpmManager) {
-    if !ptr.is_null() {
-        unsafe {
-            drop(Box::from_raw(ptr));
-        }
+    if ptr.is_null() {
+        debug!("FFI: etpm_manager_free called with null pointer");
+        return;
+    }
+    info!("FFI: Freeing EtpmManager");
+    unsafe {
+        drop(Box::from_raw(ptr));
     }
 }
 
@@ -87,13 +95,17 @@ pub extern "C" fn etpm_set_root(ptr: *mut EtpmManager, path: *const c_char) -> E
     }
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(path) {
-        Ok(p) => match manager.manager.set_root(p) {
-            Ok(_) => EtpmStatus::EtpmOk,
-            Err(e) => {
-                *manager.last_error.lock().unwrap() = Some(e.to_string());
-                (&e).into()
+        Ok(p) => {
+            info!("FFI: set_root -> {}", p);
+            match manager.manager.set_root(p) {
+                Ok(_) => EtpmStatus::EtpmOk,
+                Err(e) => {
+                    error!("FFI: set_root failed: {}", e);
+                    *manager.last_error.lock().unwrap() = Some(e.to_string());
+                    (&e).into()
+                }
             }
-        },
+        }
         Err(e) => e,
     }
 }
@@ -105,13 +117,17 @@ pub extern "C" fn etpm_set_packages(ptr: *mut EtpmManager, path: *const c_char) 
     }
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(path) {
-        Ok(p) => match manager.manager.set_packages(p) {
-            Ok(_) => EtpmStatus::EtpmOk,
-            Err(e) => {
-                *manager.last_error.lock().unwrap() = Some(e.to_string());
-                (&e).into()
+        Ok(p) => {
+            info!("FFI: set_packages -> {}", p);
+            match manager.manager.set_packages(p) {
+                Ok(_) => EtpmStatus::EtpmOk,
+                Err(e) => {
+                    error!("FFI: set_packages failed: {}", e);
+                    *manager.last_error.lock().unwrap() = Some(e.to_string());
+                    (&e).into()
+                }
             }
-        },
+        }
         Err(e) => e,
     }
 }
@@ -123,13 +139,17 @@ pub extern "C" fn etpm_add_repository(ptr: *mut EtpmManager, url: *const c_char)
     }
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(url) {
-        Ok(u) => match manager.manager.add_repository(u) {
-            Ok(_) => EtpmStatus::EtpmOk,
-            Err(e) => {
-                *manager.last_error.lock().unwrap() = Some(e.to_string());
-                (&e).into()
+        Ok(u) => {
+            info!("FFI: add_repository -> {}", u);
+            match manager.manager.add_repository(u) {
+                Ok(_) => EtpmStatus::EtpmOk,
+                Err(e) => {
+                    error!("FFI: add_repository failed: {}", e);
+                    *manager.last_error.lock().unwrap() = Some(e.to_string());
+                    (&e).into()
+                }
             }
-        },
+        }
         Err(e) => e,
     }
 }
@@ -144,13 +164,17 @@ pub extern "C" fn etpm_add_trusted_key(
     }
     let manager = unsafe { &mut *ptr };
     match c_str_to_str(key_base64) {
-        Ok(k) => match manager.manager.add_trusted_key(k) {
-            Ok(_) => EtpmStatus::EtpmOk,
-            Err(e) => {
-                *manager.last_error.lock().unwrap() = Some(e.to_string());
-                (&e).into()
+        Ok(k) => {
+            info!("FFI: add_trusted_key -> (redacted)");
+            match manager.manager.add_trusted_key(k) {
+                Ok(_) => EtpmStatus::EtpmOk,
+                Err(e) => {
+                    error!("FFI: add_trusted_key failed: {}", e);
+                    *manager.last_error.lock().unwrap() = Some(e.to_string());
+                    (&e).into()
+                }
             }
-        },
+        }
         Err(e) => e,
     }
 }
@@ -163,7 +187,9 @@ pub extern "C" fn etpm_set_allow_unsigned(ptr: *mut EtpmManager, allow: c_int) -
         return EtpmStatus::EtpmErrNullPtr;
     }
     let manager = unsafe { &mut *ptr };
-    manager.manager.set_allow_unsigned(allow != 0);
+    let allow_bool = allow != 0;
+    info!("FFI: set_allow_unsigned -> {}", allow_bool);
+    manager.manager.set_allow_unsigned(allow_bool);
     EtpmStatus::EtpmOk
 }
 
@@ -189,17 +215,21 @@ pub extern "C" fn etpm_fetch_package(
         (_, _, Err(e)) | (_, Err(e), _) | (Err(e), _, _) => return e,
     };
 
+    info!("FFI: fetch_package request {}@{} -> {}", n, v, d);
+
     let result = manager
         .runtime
         .block_on(async { manager.manager.fetch_package(n, v, d).await });
 
     match result {
         Ok(path) => {
+            info!("FFI: fetch_package succeeded: {}", path.display());
             let c_path = CString::new(path.to_string_lossy().as_ref()).unwrap();
             unsafe { *out_path = c_path.into_raw() };
             EtpmStatus::EtpmOk
         }
         Err(e) => {
+            error!("FFI: fetch_package failed: {}", e);
             *manager.last_error.lock().unwrap() = Some(e.to_string());
             (&e).into()
         }
@@ -227,13 +257,19 @@ pub extern "C" fn etpm_install_package(
         (_, _, Err(e)) | (_, Err(e), _) | (Err(e), _, _) => return e,
     };
 
+    info!("FFI: install_package {}@{} from {}", n, v, p);
+
     let result = manager
         .runtime
         .block_on(async { manager.manager.install_package(p, n, v).await });
 
     match result {
-        Ok(_) => EtpmStatus::EtpmOk,
+        Ok(_) => {
+            info!("FFI: install_package succeeded");
+            EtpmStatus::EtpmOk
+        }
         Err(e) => {
+            error!("FFI: install_package failed: {}", e);
             *manager.last_error.lock().unwrap() = Some(e.to_string());
             (&e).into()
         }
@@ -256,13 +292,19 @@ pub extern "C" fn etpm_uninstall_package(
         (_, Err(e)) | (Err(e), _) => return e,
     };
 
+    info!("FFI: uninstall_package {}@{}", n, v);
+
     let result = manager
         .runtime
         .block_on(async { manager.manager.uninstall_package(n, v).await });
 
     match result {
-        Ok(_) => EtpmStatus::EtpmOk,
+        Ok(_) => {
+            info!("FFI: uninstall_package succeeded");
+            EtpmStatus::EtpmOk
+        }
         Err(e) => {
+            error!("FFI: uninstall_package failed: {}", e);
             *manager.last_error.lock().unwrap() = Some(e.to_string());
             (&e).into()
         }
@@ -271,22 +313,29 @@ pub extern "C" fn etpm_uninstall_package(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        unsafe {
-            drop(CString::from_raw(ptr));
-        }
+    if ptr.is_null() {
+        debug!("FFI: etpm_free_string called with null pointer");
+        return;
+    }
+    debug!("FFI: Freeing string pointer");
+    unsafe {
+        drop(CString::from_raw(ptr));
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn etpm_get_last_error(ptr: *mut EtpmManager) -> *mut c_char {
     if ptr.is_null() {
+        debug!("FFI: etpm_get_last_error called with null pointer");
         return std::ptr::null_mut();
     }
     let manager = unsafe { &*ptr };
     let guard = manager.last_error.lock().unwrap();
     match guard.as_ref() {
-        Some(err) => CString::new(err.clone()).unwrap().into_raw(),
+        Some(err) => {
+            debug!("FFI: Returning last error: {}", err);
+            CString::new(err.clone()).unwrap().into_raw()
+        }
         None => std::ptr::null_mut(),
     }
 }

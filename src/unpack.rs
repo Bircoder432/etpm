@@ -3,20 +3,26 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 
 use crate::error::TpmError;
+use tracing::{debug, error, info};
 
 /// Checks if the path is safe for unpacking.
 /// Prevents Path Traversal (Tar Slip) attempts such as `..`, root directories `/`, or drive prefixes `C:`.
 pub fn is_path_safe(path: &Path) -> bool {
+    debug!("Validating path safety: {}", path.display());
     for component in path.components() {
         match component {
             std::path::Component::Normal(_) | std::path::Component::CurDir => {}
-            _ => return false,
+            _ => {
+                debug!("Unsafe path component detected: {:?}", component);
+                return false;
+            }
         }
     }
     true
 }
 
 /// Strategy to handle file conflicts during unpacking.
+#[derive(Debug)]
 pub enum ConflictStrategy {
     Overwrite,
     Skip,
@@ -39,6 +45,13 @@ pub fn unpack_package(
     addition_dest: &Path,
     conflict_strategy: ConflictStrategy,
 ) -> Result<Vec<PathBuf>, TpmError> {
+    info!(
+        "Unpacking package: {} -> overlay: {}, addition: {}",
+        package_path.display(),
+        overlay_dest.display(),
+        addition_dest.display()
+    );
+
     let file = std::fs::File::open(package_path)?;
     let decompressor = GzDecoder::new(file);
     let mut archive = Archive::new(decompressor);
@@ -48,11 +61,16 @@ pub fn unpack_package(
     for entry in archive.entries()? {
         let mut entry = entry?;
         let archive_path = entry.path()?.into_owned();
+        debug!("Processing archive entry: {}", archive_path.display());
 
         // Archive structure: package/overlay/... or package/addition/...
         // Skip the root directory "package/"
         let components: Vec<_> = archive_path.components().collect();
         if components.len() < 2 {
+            debug!(
+                "Skipping root directory entry in archive: {}",
+                archive_path.display()
+            );
             continue; // This is the root directory itself
         }
 
@@ -75,12 +93,18 @@ pub fn unpack_package(
             }
 
             if !is_path_safe(&inner_path) {
+                error!(
+                    "Path traversal detected in archive: {}",
+                    inner_path.display()
+                );
                 return Err(TpmError::PathTraversal);
             }
 
             let dest_path = overlay_dest.join(&inner_path);
+            debug!("Overlay dest path: {}", dest_path.display());
 
             if entry.header().entry_type().is_dir() {
+                debug!("Creating directory: {}", dest_path.display());
                 std::fs::create_dir_all(&dest_path)?;
                 continue;
             }
@@ -91,13 +115,25 @@ pub fn unpack_package(
 
             // Handle conflicts
             if dest_path.exists() {
+                debug!(
+                    "Conflict detected at {} (strategy: {:?})",
+                    dest_path.display(),
+                    conflict_strategy
+                );
                 match conflict_strategy {
                     ConflictStrategy::Overwrite => {
                         if dest_path.is_file() {
+                            debug!("Overwriting file: {}", dest_path.display());
                             std::fs::remove_file(&dest_path)?;
                         }
                     }
-                    ConflictStrategy::Skip => continue,
+                    ConflictStrategy::Skip => {
+                        debug!(
+                            "Skipping file due to Skip strategy: {}",
+                            dest_path.display()
+                        );
+                        continue;
+                    }
                     ConflictStrategy::Rename => {
                         let stem = dest_path
                             .file_stem()
@@ -114,6 +150,7 @@ pub fn unpack_package(
                             };
 
                             if !candidate.exists() {
+                                debug!("Renaming conflicting file to {}", candidate.display());
                                 entry.unpack(&candidate)?;
                                 break;
                             }
@@ -125,6 +162,7 @@ pub fn unpack_package(
             }
 
             entry.unpack(&dest_path)?;
+            info!("Unpacked overlay file to {}", dest_path.display());
             filelist.push(inner_path);
         } else if first_str == "addition" {
             // Unpack to addition_dest
@@ -134,12 +172,18 @@ pub fn unpack_package(
             }
 
             if !is_path_safe(&inner_path) {
+                error!(
+                    "Path traversal detected in archive addition: {}",
+                    inner_path.display()
+                );
                 return Err(TpmError::PathTraversal);
             }
 
             let dest_path = addition_dest.join(&inner_path);
+            debug!("Addition dest path: {}", dest_path.display());
 
             if entry.header().entry_type().is_dir() {
+                debug!("Creating directory: {}", dest_path.display());
                 std::fs::create_dir_all(&dest_path)?;
                 continue;
             }
@@ -149,13 +193,25 @@ pub fn unpack_package(
             }
 
             if dest_path.exists() {
+                debug!(
+                    "Conflict detected at {} (strategy: {:?})",
+                    dest_path.display(),
+                    conflict_strategy
+                );
                 match conflict_strategy {
                     ConflictStrategy::Overwrite => {
                         if dest_path.is_file() {
+                            debug!("Overwriting file: {}", dest_path.display());
                             std::fs::remove_file(&dest_path)?;
                         }
                     }
-                    ConflictStrategy::Skip => continue,
+                    ConflictStrategy::Skip => {
+                        debug!(
+                            "Skipping file due to Skip strategy: {}",
+                            dest_path.display()
+                        );
+                        continue;
+                    }
                     ConflictStrategy::Rename => {
                         let stem = dest_path
                             .file_stem()
@@ -172,6 +228,7 @@ pub fn unpack_package(
                             };
 
                             if !candidate.exists() {
+                                debug!("Renaming conflicting file to {}", candidate.display());
                                 entry.unpack(&candidate)?;
                                 break;
                             }
@@ -183,9 +240,11 @@ pub fn unpack_package(
             }
 
             entry.unpack(&dest_path)?;
+            info!("Unpacked addition file to {}", dest_path.display());
         }
     }
 
+    info!("Unpacking finished, {} files in filelist", filelist.len());
     Ok(filelist)
 }
 

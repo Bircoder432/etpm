@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 use crate::fetcher::Index;
@@ -30,6 +31,7 @@ impl PackageManager {
     /// By default, the root directory is set to the current directory (".").
     /// By default, the packages directory is set to "./packages".
     pub fn new() -> Self {
+        info!("Creating new PackageManager instance");
         Self {
             repositories: Vec::new(),
             root: PathBuf::from("."),
@@ -44,7 +46,9 @@ impl PackageManager {
     /// If the directory does not exist, it will be created.
     pub fn set_root(&mut self, root: impl Into<PathBuf>) -> Result<(), TpmError> {
         let new_root = root.into();
+        info!("Setting root directory to {}", new_root.display());
         if !new_root.exists() {
+            debug!("Directory does not exist, creating...");
             std::fs::create_dir_all(&new_root).map_err(TpmError::Io)?;
         }
         self.root = new_root;
@@ -55,7 +59,9 @@ impl PackageManager {
     /// If the directory does not exist, it will be created.
     pub fn set_packages(&mut self, packages: impl Into<PathBuf>) -> Result<(), TpmError> {
         let new_packages = packages.into();
+        info!("Setting packages directory to {}", new_packages.display());
         if !new_packages.exists() {
+            debug!("Directory does not exist, creating...");
             std::fs::create_dir_all(&new_packages).map_err(TpmError::Io)?;
         }
         self.packages = new_packages;
@@ -64,22 +70,38 @@ impl PackageManager {
 
     /// Adds a trusted Ed25519 public key (Base64 encoded) for signature verification.
     pub fn add_trusted_key(&mut self, public_key_base64: &str) -> Result<(), TpmError> {
+        info!("Adding trusted key: {}", public_key_base64);
         let key_bytes = base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,
             public_key_base64,
         )
-        .map_err(|_| TpmError::InvalidSignature)?; // Или можно сделать отдельную ошибку InvalidKeyFormat
+        .map_err(|e| {
+            error!("Invalid key format: {}", e);
+            TpmError::InvalidSignature
+        })?; // Или можно сделать отдельную ошибку InvalidKeyFormat
 
-        let verifying_key =
-            VerifyingKey::try_from(key_bytes.as_slice()).map_err(|_| TpmError::InvalidSignature)?;
+        let verifying_key = VerifyingKey::try_from(key_bytes.as_slice()).map_err(|e| {
+            error!("Invalid key format: {}", e);
+            TpmError::InvalidSignature
+        })?;
 
         self.trusted_keys.push(verifying_key);
+        debug!(
+            "Trusted key added: {}, total: {}",
+            public_key_base64,
+            self.trusted_keys.len()
+        );
         Ok(())
     }
 
     /// Sets whether unsigned packages are allowed.
     /// WARNING: This should only be set to `true` if you trust the repository and know the packages are signed.
     pub fn set_allow_unsigned(&mut self, allow: bool) {
+        if allow {
+            debug!("Allow unsigned packages: {}", allow);
+        } else {
+            debug!("Disallow unsigned packages: {}", allow);
+        }
         self.allow_unsigned = allow;
     }
 
@@ -90,12 +112,17 @@ impl PackageManager {
             url_str.push('/');
         }
 
-        let url = Url::parse(&url_str)
-            .map_err(|e| TpmError::Repository(format!("Invalid repository URL: {}", e)))?;
+        let url = Url::parse(&url_str).map_err(|e| {
+            error!("Invalid repository URL: {}", e);
+            TpmError::Repository(format!("Invalid repository URL: {}", e))
+        })?;
 
         // Avoid duplicates
         if !self.repositories.contains(&url) {
+            info!("Adding repository: {}", url);
             self.repositories.push(url);
+        } else {
+            info!("Repository already exists: {}", url);
         }
         Ok(())
     }
@@ -104,6 +131,7 @@ impl PackageManager {
     /// The root will remain the default ("."); it can be changed later via `set_root`.
     /// The packages will remain the default ("./packages"); it can be changed later via `set_packages`.
     pub fn with_repository(repo: impl AsRef<str>) -> Result<Self, TpmError> {
+        info!("Creating manager with repository: {}", repo.as_ref());
         let mut manager = Self::new();
         manager.add_repository(repo)?;
         Ok(manager)
@@ -116,11 +144,13 @@ impl PackageManager {
     async fn get_index(&self, repo: &Url) -> Result<Index, TpmError> {
         let mut cache = self.index_cache.lock().await;
         if let Some(index) = cache.get(repo) {
+            debug!("Cache hit: {}", repo);
             return Ok(index.clone());
         }
 
         let index = fetcher::fetch_index(repo).await?;
         cache.insert(repo.clone(), index.clone());
+        debug!("Cache miss: {}", repo);
         Ok(index)
     }
 
@@ -130,10 +160,12 @@ impl PackageManager {
         version: &str,
         dest: impl AsRef<Path>,
     ) -> Result<PathBuf, TpmError> {
+        info!("Fetching package: {}@{}", package_name, version);
         let dest = dest.as_ref();
         for repo in &self.repositories {
             let index = self.get_index(repo).await?;
             if fetcher::package_exists(&index, package_name, version) {
+                info!("Found package: {}@{} in {}", package_name, version, repo);
                 let package = index
                     .packages
                     .get(package_name)
@@ -151,6 +183,7 @@ impl PackageManager {
                 .await;
             }
         }
+        error!("Package not found: {}@{}", package_name, version);
         Err(TpmError::PackageNotFound(
             package_name.to_string(),
             version.to_string(),
@@ -169,6 +202,7 @@ impl PackageManager {
         package_name: &str,
         package_version: &str,
     ) -> Result<(), TpmError> {
+        info!("Installing package: {}@{}", package_name, package_version);
         let path = path_package.as_ref().to_path_buf();
         let root = self.root.clone();
         let packages = self.packages.clone();
@@ -179,17 +213,21 @@ impl PackageManager {
             // Create package directory: $packages/<name>-<ver>/
             let package_dir = packages.join(format!("{}-{}", name, version));
             std::fs::create_dir_all(&package_dir)?;
+            info!("Created package directory: {}", package_dir.display());
 
             // Unpack overlay to root, addition to package_dir
             let filelist = unpack_package(&path, &root, &package_dir, ConflictStrategy::Overwrite)?;
+            info!("Unpacked package to: {}", package_dir.display());
 
             // Generate filelist
             let filelist_path = package_dir.join("filelist");
+            info!("Generating filelist: {}", filelist_path.display());
             let filelist_content: String = filelist
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
+            info!("Filelist content: {}", filelist_content);
             std::fs::write(&filelist_path, filelist_content)?;
 
             Ok(())
@@ -218,6 +256,7 @@ impl PackageManager {
         package_name: &str,
         package_version: &str,
     ) -> Result<(), TpmError> {
+        info!("Uninstalling package: {}@{}", package_name, package_version);
         let root = self.root.clone();
         let packages = self.packages.clone();
         let name = package_name.to_string();
@@ -228,10 +267,15 @@ impl PackageManager {
             let filelist_path = package_dir.join("filelist");
 
             if !package_dir.exists() {
+                error!(
+                    "Package directory does not exist: {}",
+                    package_dir.display()
+                );
                 return Err(TpmError::PackageNotFound(name, version));
             }
 
             if filelist_path.exists() {
+                info!("Reading filelist: {}", filelist_path.display());
                 let content = std::fs::read_to_string(&filelist_path)?;
                 for line in content.lines() {
                     let line = line.trim();
@@ -242,10 +286,7 @@ impl PackageManager {
                     let file_path = PathBuf::from(line);
 
                     if !is_path_safe(&file_path) {
-                        eprintln!(
-                            "Warning: skipping unsafe path in filelist: {}",
-                            file_path.display()
-                        );
+                        warn!("Skipping unsafe path in filelist: {}", file_path.display());
                         continue;
                     }
 
@@ -254,25 +295,26 @@ impl PackageManager {
                     if full_path.exists() {
                         if full_path.is_file() {
                             if let Err(e) = std::fs::remove_file(&full_path) {
-                                eprintln!(
-                                    "Warning: failed to remove {}: {}",
-                                    full_path.display(),
-                                    e
-                                );
+                                warn!("Failed to remove {}: {}", full_path.display(), e);
                             }
                         } else {
-                            eprintln!("Warning: {} is not a file, skipping", full_path.display());
+                            warn!("{} is not a file, skipping", full_path.display());
                         }
                     }
                 }
             }
 
+            info!("Remove package directory: {}", package_dir.display());
             std::fs::remove_dir_all(&package_dir)?;
 
+            info!("Package {} uninstalled", package_dir.display());
             Ok(())
         })
         .await
-        .map_err(|e| TpmError::Repository(format!("Blocking task panicked: {}", e)))?
+        .map_err(|e| {
+            error!("Blocking task panicked: {}", e);
+            TpmError::Repository(format!("Blocking task panicked: {}", e))
+        })?
     }
 
     pub async fn check_update(
@@ -280,29 +322,51 @@ impl PackageManager {
         package_name: &str,
         current_version: &str,
     ) -> Result<bool, TpmError> {
+        info!(
+            "Checking updates for {} current {}",
+            package_name, current_version
+        );
         for repo in &self.repositories {
+            debug!("Checking repository {} for updates", repo);
             let index = self.get_index(repo).await?;
             if fetcher::check_update(&index, package_name, current_version)? {
+                info!(
+                    "Update available for {}@{} in {}",
+                    package_name, current_version, repo
+                );
                 return Ok(true);
             }
         }
+        info!("No updates found for {}@{}", package_name, current_version);
         Ok(false)
     }
 
     pub async fn get_latest_version(&self, package_name: &str) -> Result<Option<String>, TpmError> {
+        info!("Retrieving latest version for {}", package_name);
         let mut latest_overall: Option<semver::Version> = None;
         let mut latest_str: Option<String> = None;
 
         for repo in &self.repositories {
+            debug!("Checking repository {} for latest version", repo);
             let index = self.get_index(repo).await?;
             if let Some(ver_str) = fetcher::get_latest_version_from_index(&index, package_name) {
+                debug!("Found candidate version {} in {}", ver_str, repo);
                 if let Ok(parsed) = semver::Version::parse(&ver_str) {
                     if latest_overall.as_ref().map_or(true, |max| &parsed > max) {
                         latest_overall = Some(parsed);
-                        latest_str = Some(ver_str);
+                        latest_str = Some(ver_str.clone());
+                        info!(
+                            "New latest version for {}: {} (from {})",
+                            package_name, ver_str, repo
+                        );
                     }
                 }
             }
+        }
+        if let Some(ref v) = latest_str {
+            info!("Latest version for {} is {}", package_name, v);
+        } else {
+            info!("No versions found for {}", package_name);
         }
         Ok(latest_str)
     }

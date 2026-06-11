@@ -2,6 +2,15 @@
 name = "etpm"
 version = "0.1.0"
 edition = "2024"
+authors = ["Vadim Storozhilov"]
+description = "ETPM — a tiny, embeddable package manager library for Rust focused on downloading and installing tar.gz package archives from HTTP repositories."
+readme = "README.md"
+license = "MIT"
+license-file = "LICENSE"
+repository = "https://codeberg.org/vstor08/etpm.git"
+homepage = "https://codeberg.org/vstor08/etpm"
+documentation = "https://docs.rs/etpm"
+keywords = ["package-manager", "embedded", "etpm", "ed25519", "tar", "async", "cdylib"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -18,9 +27,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 tar = "0.4.46"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
-
-
 
 [dev-dependencies]
 rand = { version = "0.10.1", features = ["thread_rng"] }

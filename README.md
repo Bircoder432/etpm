@@ -1,175 +1,182 @@
-
 # ETPM - Embeddable Tiny Package Manager
 
-ETPM is a lightweight, embeddable package manager library written in Rust. It is designed to fetch and install packages from HTTP repositories. ETPM is not a full-featured package manager: it does not resolve dependencies or manage system-wide installations. Instead, it focuses on a single task: securely downloading a package archive, verifying its authenticity via Ed25519 signatures, extracting it according to a strict layout, and tracking installed files for clean removal.
+ETPM (crate name: `etpm`) is a small, embeddable package manager library for Rust focused on securely downloading, verifying, and installing self-contained package archives from HTTP repositories. It is intentionally minimal — it does not perform dependency resolution or system package management — instead it provides a simple, auditable workflow for delivering application/artifact overlays and package metadata.
+
+## Highlights
+
+- Minimal, single-responsibility design.
+- Packages are standard `tar.gz` archives with a strict layout (`package/overlay` + `package/addition`). Files in `overlay` are extracted into the configured `root`; files in `addition` are stored under the package directory and tracked.
+- Cryptographic verification with Ed25519 signatures. Packages must include a Base64-encoded `.sig` file and are verified against registered trusted public keys.
+- Safe unpacking: built-in Path Traversal (Tar Slip) protection.
+- Fully asynchronous API powered by `tokio` and typed error handling via `thiserror`.
+- C FFI (`cdylib`) for embedding in other languages — header available as `etpm.h`.
+- Uses `tracing` macros for structured logging (library does not install a global subscriber; initialize logging in your application to see logs).
 
 ## Features
 
-- **Minimalist & Focused**: Designed for monolithic, self-contained packages without complex dependency resolution.
-- **Structured Archives**: Packages are strictly divided into `overlay` (files for the target system) and `addition` (package-specific metadata).
-- **Cryptographic Verification**: All packages are signed with Ed25519. ETPM verifies signatures against a set of trusted public keys before installation, ensuring authenticity and integrity.
-- **Automatic Tracking**: Generates a `filelist` upon installation, enabling safe, complete, and verifiable uninstallation.
-- **Security First**: Built-in protection against Path Traversal (Tar Slip) attacks during archive extraction.
-- **Async & Typed**: Fully asynchronous API powered by `tokio`, with comprehensive, typed error handling via `thiserror`.
-- **Universal Embedding**: Provides a stable, safe **C FFI** (`etpm.h`), making it easy to embed ETPM into C, C++, Go, Python, Node.js, or any language with C-bindings support.
+- Structured archives: `overlay` and `addition` directories inside each package.
+- Signature verification using Ed25519 (multiple trusted keys supported).
+- Atomic writes for downloaded files (temporary file renamed on successful verification).
+- Filelist generation to support safe uninstall.
+- C API for embedding in non-Rust environments.
 
 ## Installation (Rust)
 
-Add this to your `Cargo.toml`:
+From crates.io (recommended once published):
+
+```toml
+[dependencies]
+etpm = "0.1.0"
+tokio = { version = "1", features = ["full"] }
+```
+
+Or use the current repository directly:
 
 ```toml
 [dependencies]
 etpm = { git = "https://codeberg.org/vstor08/etpm.git" }
-tokio = { version = "1", features = ["full"] }
 ```
 
-## Package Format
+If you want to see library logs, add `tracing-subscriber` to your application and initialize it (see Logging section).
 
-ETPM expects package archives (`.tp` files, which are standard `.tar.gz` archives) to have a strict internal directory structure:
+## Logging
 
-```text
-my-package-1.0.0.tp
-└── package/
-    ├── overlay/          # Contents are extracted to the `root` directory
-    │   ├── usr/
-    │   │   └── bin/
-    │   │       └── my-app
-    │   └── etc/
-    │       └── my-app.conf
-    └── addition/         # Contents are extracted to the `packages/<name>-<ver>` directory
-        └── metadata.json
+The library emits structured logs using the `tracing` crate. The library itself does NOT initialize a global subscriber — this should be done by the consuming application so it can control formatting and filtering.
+
+Example minimal initialization in your binary:
+
+```rust
+use tracing_subscriber;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize a simple subscriber which respects RUST_LOG
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    // ... start tokio runtime or call async main
+    Ok(())
+}
 ```
 
-*Note: The top-level `package/` directory is automatically stripped during extraction.*
+Then control log level with `RUST_LOG`, e.g. `RUST_LOG=info cargo run` or `RUST_LOG=debug cargo run`.
 
-## Signature Verification
+## Package format
 
-ETPM enforces signature verification for all packages. Each package archive must have a corresponding `.sig` file containing a Base64-encoded Ed25519 signature.
+ETPM expects `.tp` files to be standard `tar.gz` archives whose top-level directory is `package/` and which contain two subtrees:
 
-### Repository Layout with Signatures
+```
+package/
+├── overlay/    # files to extract into the configured root
+└── addition/   # files to place under packages/<name>-<version>/ (metadata, filelist, etc.)
+```
 
-```text
+The `package/` prefix is stripped during extraction.
+
+## Repository layout and signatures
+
+A repository must expose an `index.ron` file at its root describing available packages and versions. Each `url` field is relative to the repository root and the corresponding signature file must be available at `{url}.sig`.
+
+Example repository layout:
+
+```
 repository/
 ├── index.ron
 ├── my-app-1.0.0.tp
-├── my-app-1.0.0.tp.sig    # Base64-encoded Ed25519 signature
+├── my-app-1.0.0.tp.sig
 ├── my-app-1.1.0.tp
 └── my-app-1.1.0.tp.sig
 ```
 
-### How Verification Works
+Example `index.ron` structure:
 
-1. ETPM downloads the `.tp` archive to a temporary file.
-2. ETPM downloads the corresponding `.sig` file.
-3. The archive content is verified against the signature using one of the registered trusted public keys.
-4. If verification succeeds, the temporary file is atomically renamed to the final path.
-5. If verification fails, the temporary file is deleted and an `InvalidSignature` error is returned.
-
-### Generating Keys and Signing Packages
-
-**Generate a keypair** (using Python with PyNaCl):
-```python
-import nacl.signing
-import base64
-
-signing_key = nacl.signing.SigningKey.generate()
-verify_key = signing_key.verify_key
-
-print("Private Key (keep secret!):", base64.b64encode(signing_key.encode()).decode())
-print("Public Key (distribute!):", base64.b64encode(verify_key.encode()).decode())
-```
-
-**Sign a package**:
-```python
-import nacl.signing
-import base64
-
-signing_key = nacl.signing.SigningKey(base64.b64decode("YOUR_PRIVATE_KEY"))
-
-with open("my-app-1.0.0.tp", "rb") as f:
-    package_data = f.read()
-
-signature = signing_key.sign(package_data).signature
-
-with open("my-app-1.0.0.tp.sig", "w") as f:
-    f.write(base64.b64encode(signature).decode())
+```ron
+(
+    packages: {
+        "my-app": [
+            (version: "1.0.0", url: "my-app-1.0.0.tp"),
+            (version: "1.1.0", url: "my-app-1.1.0.tp")
+        ]
+    }
+)
 ```
 
 ## Usage (Rust)
 
-The following example demonstrates the complete lifecycle: configuring directories, registering a trusted key, fetching, installing, and uninstalling a package.
+This example demonstrates initialization (including logging), adding a repository and a trusted key, fetching, installing and uninstalling a package.
 
 ```rust
 use etpm::PackageManager;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // initialize logging in the application if you want to see library logs
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let mut manager = PackageManager::new();
-
-    // 1. Configure directories
-    manager.set_root("/opt/my-application")?;
-    manager.set_packages("/var/lib/etpm")?;
-
-    // 2. Add a repository
+    manager.set_root("./packages")?;
+    manager.set_packages("./packages")?;
     manager.add_repository("https://repo.example.com/")?;
 
-    // 3. Register a trusted public key (Base64-encoded Ed25519)
-    // This key MUST match the one used to sign packages in the repository.
-    let trusted_public_key = "REPLACE_WITH_BASE64_PUBLIC_KEY==";
-    manager.add_trusted_key(trusted_public_key)?;
+    // register the Base64-encoded Ed25519 public key used for signing packages
+    manager.add_trusted_key("REPLACE_WITH_BASE64_PUBLIC_KEY==")?;
 
-    // 4. Fetch the package (automatically downloads and verifies .sig)
-    let pkg_path = manager.fetch_package("my-app", "1.0.0", "/tmp").await?;
+    // fetch the package (downloads, verifies signature, returns local path)
+    let package_path = manager.fetch_package("my-package", "1.0.0", "./downloads").await?;
 
-    // 5. Install the package
-    manager.install_package(&pkg_path, "my-app", "1.0.0").await?;
-    println!("Package installed successfully.");
+    // install (unpacks overlay to root and addition to package dir)
+    manager.install_package(&package_path, "my-package", "1.0.0").await?;
 
-    // 6. Uninstall the package later
-    manager.uninstall_package("my-app", "1.0.0").await?;
-    println!("Package uninstalled successfully.");
+    // uninstall later if needed
+    manager.uninstall_package("my-package", "1.0.0").await?;
 
     Ok(())
 }
 ```
 
-### Multiple Trusted Keys
+## API highlights
 
-ETPM supports multiple trusted keys. A package is considered valid if its signature matches **any** of the registered keys. This is useful for supporting packages from multiple authors:
-
-```rust
-manager.add_trusted_key("PUBLIC_KEY_AUTHOR_1==")?;
-manager.add_trusted_key("PUBLIC_KEY_AUTHOR_2==")?;
-```
+- `PackageManager::new()` — create a new manager instance.
+- `set_root(path)` — set the installation root for `overlay` files.
+- `set_packages(path)` — set the directory to store package metadata and filelists.
+- `add_repository(url)` — add a repository URL (trailing slash will be normalized).
+- `add_trusted_key(base64_pubkey)` — register a Base64-encoded Ed25519 public key for signature verification.
+- `set_allow_unsigned(bool)` — allow downloading unsigned packages (use with caution).
+- `fetch_package(name, version, dest)` — download and verify a package, returning the local path to the `.tp` file.
+- `install_package(path, name, version)` — unpack and install the downloaded package.
+- `uninstall_package(name, version)` — remove files recorded in the package `filelist` and delete the package directory.
+- `check_update(name, current_version)` — asynchronously checks configured repositories for newer versions; returns `true` if an update exists.
+- `get_latest_version(name)` — returns `Option<String>` with the latest version found across repositories.
 
 ## Embedding via C FFI
 
-ETPM exposes a clean, memory-safe C API. You can find the `etpm.h` header file in the root of the repository.
+The C header `etpm.h` (in the repository root) describes the exported functions and status codes. Sample usage in C:
 
-### Example (C)
 ```c
 #include <stdio.h>
 #include "etpm.h"
 
 int main() {
     EtpmManager* manager = etpm_manager_new();
-    
+
     etpm_set_root(manager, "/opt/my-application");
     etpm_set_packages(manager, "/var/lib/etpm");
     etpm_add_repository(manager, "https://repo.example.com/");
-    
+
     // Register trusted public key
     etpm_add_trusted_key(manager, "REPLACE_WITH_BASE64_PUBLIC_KEY==");
 
     char* pkg_path = NULL;
     EtpmStatus status = etpm_fetch_package(manager, "my-app", "1.0.0", "/tmp", &pkg_path);
-    
+
     if (status == ETPM_OK) {
         printf("Downloaded & verified: %s\n", pkg_path);
-        
+
         etpm_install_package(manager, pkg_path, "my-app", "1.0.0");
         etpm_free_string(pkg_path);
-        
+
         etpm_uninstall_package(manager, "my-app", "1.0.0");
     } else if (status == ETPM_ERR_INVALID_SIGNATURE) {
         printf("Security error: package signature is invalid or missing!\n");
@@ -184,42 +191,20 @@ int main() {
 }
 ```
 
-*(Bindings for Go, Python, and other languages can be easily written using this C API).*
+## Building from source
 
-## How Uninstallation Works
+Build the Rust library and the C dynamic library (`cdylib`):
 
-When `uninstall_package` is called, ETPM performs the following steps safely:
-1. Locates the package directory at `$packages/<name>-<version>/`.
-2. Reads the generated `filelist` file.
-3. Iterates through the list, verifying each path against Path Traversal rules.
-4. Removes each listed file from the `$root` directory (skipping missing files or directories gracefully to prevent errors).
-5. Deletes the entire `$packages/<name>-<version>/` directory.
-
-*Note: ETPM does not attempt to remove empty parent directories after file deletion, as they may contain files belonging to other packages or the host system.*
-
-## Repository Format
-
-A repository must contain an `index.ron` file at its root with the following structure:
-
-```ron
-(
-    packages: {
-        "my-app": [
-            (version: "1.0.0", url: "my-app-1.0.0.tp"),
-            (version: "1.1.0", url: "my-app-1.1.0.tp")
-        ]
-    }
-)
-```
-The `url` field is relative to the repository URL. ETPM automatically joins the repository URL with this field to form the final download link. The corresponding `.sig` file is expected at `{url}.sig`.
-
-## Building from Source
-
-To build the Rust library and the C dynamic library (`cdylib`):
 ```bash
 cargo build --release
 ```
-The compiled library will be located in `target/release/` (e.g., `libetpm.so`, `libetpm.dylib`, or `etpm.dll`).
+
+Artifacts will be available in `target/release/` (e.g. `libetpm.so`, `libetpm.dylib`, `etpm.dll`).
+
+## Notes on security
+
+- Keep private signing keys secret. Only distribute public keys to clients that should trust packages.
+- `set_allow_unsigned(true)` disables signature enforcement — use only in trusted environments.
 
 ## License
 
