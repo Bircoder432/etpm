@@ -7,6 +7,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     manager.set_packages("./packages")?;
     manager.add_repository("http://127.0.0.1:22869/")?;
 
+    manager.set_allow_unsigned(true);
+
     println!("Repositories: {:?}", manager.list_repositories());
 
     // Step 1: Install the package

@@ -11,6 +11,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add repository
     manager.add_repository("http://127.0.0.1:22869/")?;
 
+    manager.set_allow_unsigned(true);
+
     println!("Repositories: {:?}", manager.list_repositories());
 
     let downloaded_path = manager

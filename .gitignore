@@ -1,3 +1,6 @@
 /target
 testroot
 testroot_c
+packages
+etpm_example
+example-package-*
