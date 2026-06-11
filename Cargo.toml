@@ -7,6 +7,8 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+base64 = "0.22.1"
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
 flate2 = "1.1.9"
 futures-util = "0.3.32"
 reqwest = { version = "0.13.4", features = ["blocking", "json", "stream"] }
@@ -18,5 +20,11 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 url = "2.5.8"
 
+
+
 [dev-dependencies]
+rand = { version = "0.10.1", features = ["thread_rng"] }
 tempfile = "3.27.0"
+wiremock = "0.6.5"
+ed25519-dalek = { version = "2.2.0", features = ["std","rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }

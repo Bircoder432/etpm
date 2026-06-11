@@ -1,3 +1,4 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use semver::Version;
 use serde::Deserialize;
@@ -58,35 +59,70 @@ pub async fn download_package(
     package: &PackageVersion,
     package_name: &str,
     destination: &Path,
+    trusted_keys: &[VerifyingKey],
 ) -> Result<PathBuf, TpmError> {
-    let url = repository.join(&package.url)?;
-    let response = reqwest::get(url).await?;
+    let pkg_url = repository.join(&package.url)?;
+    let sig_url = repository.join(&format!("{}.sig", package.url))?;
 
+    let temp_pkg_path = destination.join(format!("{}-{}.tp.tmp", package_name, package.version));
+    let final_pkg_path = destination.join(format!("{}-{}.tp", package_name, package.version));
+
+    let response = reqwest::get(pkg_url).await?;
     if !response.status().is_success() {
         return Err(TpmError::Repository(format!(
-            "Failed to download: {}",
+            "Failed to download package: {}",
             response.status()
         )));
     }
 
-    // Atomic download: write to temp file to avoid corruption on network failure
-    let temp_path = destination.join(format!("{}-{}.tp.tmp", package_name, package.version));
-    let final_path = destination.join(format!("{}-{}.tp", package_name, package.version));
-
-    let mut file = tokio::fs::File::create(&temp_path).await?;
+    let mut file = tokio::fs::File::create(&temp_pkg_path).await?;
     let mut stream = response.bytes_stream();
+    let mut file_bytes = Vec::new();
 
     while let Some(item) = stream.next().await {
         let chunk = item?;
+        file_bytes.extend_from_slice(&chunk);
         file.write_all(&chunk).await?;
     }
-
     file.flush().await?;
     drop(file);
 
-    tokio::fs::rename(&temp_path, &final_path).await?;
+    if trusted_keys.is_empty() {
+        tokio::fs::remove_file(&temp_pkg_path).await?;
+        return Err(TpmError::Repository(
+            "No trusted keys configured for signature verification".into(),
+        ));
+    }
 
-    Ok(final_path)
+    let sig_response = reqwest::get(sig_url).await?;
+    if !sig_response.status().is_success() {
+        tokio::fs::remove_file(&temp_pkg_path).await?;
+        return Err(TpmError::InvalidSignature);
+    }
+    let sig_text = sig_response.text().await?;
+    let sig_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, sig_text.trim())
+            .map_err(|_| TpmError::InvalidSignature)?;
+
+    let signature =
+        Signature::try_from(sig_bytes.as_slice()).map_err(|_| TpmError::InvalidSignature)?;
+
+    let mut signature_valid = false;
+    for key in trusted_keys {
+        if key.verify(&file_bytes, &signature).is_ok() {
+            signature_valid = true;
+            break;
+        }
+    }
+
+    if !signature_valid {
+        tokio::fs::remove_file(&temp_pkg_path).await?;
+        return Err(TpmError::InvalidSignature);
+    }
+
+    tokio::fs::rename(&temp_pkg_path, &final_pkg_path).await?;
+
+    Ok(final_pkg_path)
 }
 
 pub fn get_latest_version_from_index(index: &Index, package_name: &str) -> Option<String> {

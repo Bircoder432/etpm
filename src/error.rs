@@ -25,4 +25,9 @@ pub enum TpmError {
 
     #[error("Invalid URL format: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    #[error(
+        "Signature verification failed: the package may be tampered with or signed by an untrusted key"
+    )]
+    InvalidSignature,
 }

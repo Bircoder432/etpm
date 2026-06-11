@@ -23,6 +23,7 @@ typedef enum {
     ETPM_ERR_REPOSITORY = 8,
     ETPM_ERR_RON_PARSE = 9,
     ETPM_ERR_URL_PARSE = 10,
+    ETPM_ERR_INVALID_SIGNATURE = 11,
     ETPM_ERR_UNKNOWN = 99
 } EtpmStatus;
 

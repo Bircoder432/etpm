@@ -13,6 +13,7 @@ pub struct EtpmManager {
 
 /// Status codes returned by FFI functions.
 #[repr(C)]
+#[allow(dead_code)]
 pub enum EtpmStatus {
     EtpmOk = 0,
     EtpmErrNullPtr = 1,
@@ -25,6 +26,7 @@ pub enum EtpmStatus {
     EtpmErrRepository = 8,
     EtpmErrRonParse = 9,
     EtpmErrUrlParse = 10,
+    EtpmErrInvalidSignature = 11,
     EtpmErrUnknown = 99,
 }
 
@@ -39,6 +41,7 @@ impl From<&TpmError> for EtpmStatus {
             TpmError::Repository(_) => EtpmStatus::EtpmErrRepository,
             TpmError::RonParse(_) => EtpmStatus::EtpmErrRonParse,
             TpmError::UrlParse(_) => EtpmStatus::EtpmErrUrlParse,
+            TpmError::InvalidSignature => EtpmStatus::EtpmErrInvalidSignature,
         }
     }
 }
@@ -273,5 +276,28 @@ pub extern "C" fn etpm_get_last_error(ptr: *mut EtpmManager) -> *mut c_char {
     match guard.as_ref() {
         Some(err) => CString::new(err.clone()).unwrap().into_raw(),
         None => std::ptr::null_mut(),
+    }
+}
+
+/// Adds a trusted Ed25519 public key (Base64 encoded) for signature verification.
+#[unsafe(no_mangle)]
+pub extern "C" fn etpm_add_trusted_key(
+    ptr: *mut EtpmManager,
+    key_base64: *const c_char,
+) -> EtpmStatus {
+    if ptr.is_null() {
+        return EtpmStatus::EtpmErrNullPtr;
+    }
+
+    let manager = unsafe { &mut *ptr };
+    match c_str_to_str(key_base64) {
+        Ok(k) => match manager.manager.add_trusted_key(k) {
+            Ok(_) => EtpmStatus::EtpmOk,
+            Err(e) => {
+                *manager.last_error.lock().unwrap() = Some(e.to_string());
+                (&e).into()
+            }
+        },
+        Err(e) => e,
     }
 }

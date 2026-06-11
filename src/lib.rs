@@ -1,3 +1,4 @@
+use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +20,7 @@ pub struct PackageManager {
     repositories: Vec<Url>,
     root: PathBuf,
     packages: PathBuf,
+    trusted_keys: Vec<VerifyingKey>,
     index_cache: Arc<Mutex<HashMap<Url, Index>>>,
 }
 
@@ -31,6 +33,7 @@ impl PackageManager {
             repositories: Vec::new(),
             root: PathBuf::from("."),
             packages: PathBuf::from("./packages"),
+            trusted_keys: Vec::new(),
             index_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -54,6 +57,21 @@ impl PackageManager {
             std::fs::create_dir_all(&new_packages).map_err(TpmError::Io)?;
         }
         self.packages = new_packages;
+        Ok(())
+    }
+
+    /// Adds a trusted Ed25519 public key (Base64 encoded) for signature verification.
+    pub fn add_trusted_key(&mut self, public_key_base64: &str) -> Result<(), TpmError> {
+        let key_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            public_key_base64,
+        )
+        .map_err(|_| TpmError::InvalidSignature)?; // Или можно сделать отдельную ошибку InvalidKeyFormat
+
+        let verifying_key =
+            VerifyingKey::try_from(key_bytes.as_slice()).map_err(|_| TpmError::InvalidSignature)?;
+
+        self.trusted_keys.push(verifying_key);
         Ok(())
     }
 
@@ -114,7 +132,14 @@ impl PackageManager {
                     .and_then(|versions| versions.iter().find(|v| v.version == version))
                     .unwrap();
 
-                return fetcher::download_package(repo, package, package_name, dest).await;
+                return fetcher::download_package(
+                    repo,
+                    package,
+                    package_name,
+                    dest,
+                    &self.trusted_keys,
+                )
+                .await;
             }
         }
         Err(TpmError::PackageNotFound(
