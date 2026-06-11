@@ -10,7 +10,7 @@ license-file = "LICENSE"
 repository = "https://codeberg.org/vstor08/etpm.git"
 homepage = "https://codeberg.org/vstor08/etpm"
 documentation = "https://docs.rs/etpm"
-keywords = ["package-manager", "embedded", "etpm", "ed25519", "tar", "async", "cdylib"]
+keywords = ["package-manager", "embedded", "ed25519", "async", "cdylib"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
