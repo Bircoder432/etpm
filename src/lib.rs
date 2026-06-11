@@ -9,6 +9,7 @@ use crate::unpack::{is_path_safe, unpack_package};
 
 mod error;
 mod fetcher;
+mod ffi;
 mod unpack;
 
 pub use error::TpmError;
