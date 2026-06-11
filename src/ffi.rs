@@ -26,6 +26,8 @@ pub enum EtpmStatus {
     EtpmErrRonParse = 9,
     EtpmErrUrlParse = 10,
     EtpmErrInvalidSignature = 11,
+    EtpmErrAdditionFileNotFound = 12,
+    EtpmErrInvalidAdditionPath = 13,
     EtpmErrUnknown = 99,
 }
 
@@ -41,6 +43,8 @@ impl From<&TpmError> for EtpmStatus {
             TpmError::RonParse(_) => EtpmStatus::EtpmErrRonParse,
             TpmError::UrlParse(_) => EtpmStatus::EtpmErrUrlParse,
             TpmError::InvalidSignature => EtpmStatus::EtpmErrInvalidSignature,
+            TpmError::AdditionFileNotFound(_) => EtpmStatus::EtpmErrAdditionFileNotFound,
+            TpmError::InvalidAdditionPath => EtpmStatus::EtpmErrInvalidAdditionPath,
         }
     }
 }
@@ -320,6 +324,53 @@ pub extern "C" fn etpm_free_string(ptr: *mut c_char) {
     debug!("FFI: Freeing string pointer");
     unsafe {
         drop(CString::from_raw(ptr));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn etpm_read_addition_file(
+    ptr: *mut EtpmManager,
+    pkg_path: *const c_char,
+    file_path: *const c_char,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+) -> EtpmStatus {
+    if ptr.is_null() || out_data.is_null() || out_len.is_null() {
+        return EtpmStatus::EtpmErrNullPtr;
+    }
+
+    let manager = unsafe { &*ptr };
+    let (p, f) = match (c_str_to_str(pkg_path), c_str_to_str(file_path)) {
+        (Ok(p), Ok(f)) => (p, f),
+        (_, Err(e)) | (Err(e), _) => return e,
+    };
+
+    let result = manager.manager.read_addition_file(p, f);
+    match result {
+        Ok(data) => {
+            let boxed_slice = data.into_boxed_slice();
+            let len = boxed_slice.len();
+            let ptr = Box::into_raw(boxed_slice) as *mut u8;
+            unsafe {
+                *out_data = ptr;
+                *out_len = len;
+            }
+            EtpmStatus::EtpmOk
+        }
+        Err(e) => {
+            *manager.last_error.lock().unwrap() = Some(e.to_string());
+            (&e).into()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn etpm_free_buffer(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
     }
 }
 

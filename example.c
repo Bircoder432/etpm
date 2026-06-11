@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include "etpm.h"
 
 void print_error(EtpmManager* manager, const char* context) {
@@ -85,3 +84,4 @@ int main() {
 
     return 0;
 }
+

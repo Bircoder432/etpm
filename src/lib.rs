@@ -1,7 +1,10 @@
 use ed25519_dalek::VerifyingKey;
+use flate2::read::GzDecoder;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tar::Archive;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -315,6 +318,50 @@ impl PackageManager {
             error!("Blocking task panicked: {}", e);
             TpmError::Repository(format!("Blocking task panicked: {}", e))
         })?
+    }
+
+    /// Reads a file from the `addition` directory of a downloaded `.tp` archive.
+    /// This allows inspecting metadata or configuration files before installation.
+    ///
+    /// # Arguments
+    /// * `package_path` - Path to the downloaded `.tp` archive.
+    /// * `file_path` - Relative path to the file inside the `addition` directory
+    ///   (e.g., `"manifest.json"` or `"config/settings.toml"`).
+    ///
+    /// # Returns
+    /// A `Vec<u8>` containing the raw file contents. The caller is responsible for
+    /// deserializing or parsing the data.
+    pub fn read_addition_file(
+        &self,
+        package_path: impl AsRef<Path>,
+        file_path: impl AsRef<Path>,
+    ) -> Result<Vec<u8>, TpmError> {
+        let req_path = file_path.as_ref();
+
+        if !is_path_safe(req_path) || req_path.is_absolute() {
+            return Err(TpmError::InvalidAdditionPath);
+        }
+
+        let path_str = req_path.to_string_lossy().replace('\\', "/");
+        let target_prefix = format!("package/addition/{}", path_str);
+
+        let file = std::fs::File::open(package_path.as_ref()).map_err(TpmError::Io)?;
+        let decompressor = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressor);
+
+        for entry in archive.entries().map_err(TpmError::Io)? {
+            let mut entry = entry.map_err(TpmError::Io)?;
+            let entry_path = entry.path().map_err(TpmError::Io)?;
+            let entry_path_str = entry_path.to_string_lossy().replace('\\', "/");
+
+            if entry_path_str == target_prefix {
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents).map_err(TpmError::Io)?;
+                return Ok(contents);
+            }
+        }
+
+        Err(TpmError::AdditionFileNotFound(path_str))
     }
 
     pub async fn check_update(
