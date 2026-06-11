@@ -6,7 +6,6 @@ authors = ["Vadim Storozhilov"]
 description = "ETPM — a tiny, embeddable package manager library for Rust focused on downloading and installing tar.gz package archives from HTTP repositories."
 readme = "README.md"
 license = "MIT"
-license-file = "LICENSE"
 repository = "https://codeberg.org/vstor08/etpm.git"
 homepage = "https://codeberg.org/vstor08/etpm"
 documentation = "https://docs.rs/etpm"
