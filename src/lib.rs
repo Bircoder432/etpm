@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use url::Url;
 
 use crate::fetcher::Index;
-use crate::unpack::unpack_package;
+use crate::unpack::{is_path_safe, unpack_package};
 
 mod error;
 mod fetcher;
@@ -17,16 +17,19 @@ pub use unpack::ConflictStrategy;
 pub struct PackageManager {
     repositories: Vec<Url>,
     root: PathBuf,
+    packages: PathBuf,
     index_cache: Arc<Mutex<HashMap<Url, Index>>>,
 }
 
 impl PackageManager {
     /// Creates a new instance of the manager.
     /// By default, the root directory is set to the current directory (".").
+    /// By default, the packages directory is set to "./packages".
     pub fn new() -> Self {
         Self {
             repositories: Vec::new(),
             root: PathBuf::from("."),
+            packages: PathBuf::from("./packages"),
             index_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -39,6 +42,17 @@ impl PackageManager {
             std::fs::create_dir_all(&new_root).map_err(TpmError::Io)?;
         }
         self.root = new_root;
+        Ok(())
+    }
+
+    /// Explicitly sets or changes the packages directory for storing package metadata.
+    /// If the directory does not exist, it will be created.
+    pub fn set_packages(&mut self, packages: impl Into<PathBuf>) -> Result<(), TpmError> {
+        let new_packages = packages.into();
+        if !new_packages.exists() {
+            std::fs::create_dir_all(&new_packages).map_err(TpmError::Io)?;
+        }
+        self.packages = new_packages;
         Ok(())
     }
 
@@ -61,14 +75,7 @@ impl PackageManager {
 
     /// A convenient constructor when you want to create a manager with a single repository.
     /// The root will remain the default ("."); it can be changed later via `set_root`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tpm::PackageManager;
-    ///
-    /// let manager = PackageManager::with_repository("https://example.com/repo/").unwrap();
-    /// ```
+    /// The packages will remain the default ("./packages"); it can be changed later via `set_packages`.
     pub fn with_repository(repo: impl AsRef<str>) -> Result<Self, TpmError> {
         let mut manager = Self::new();
         manager.add_repository(repo)?;
@@ -115,12 +122,119 @@ impl PackageManager {
         ))
     }
 
-    pub async fn install_package(&self, path_package: impl AsRef<Path>) -> Result<(), TpmError> {
+    /// Installs a package from the archive.
+    ///
+    /// # Arguments
+    /// * `path_package` - Path to the .tp archive file
+    /// * `package_name` - Name of the package
+    /// * `package_version` - Version of the package
+    pub async fn install_package(
+        &self,
+        path_package: impl AsRef<Path>,
+        package_name: &str,
+        package_version: &str,
+    ) -> Result<(), TpmError> {
         let path = path_package.as_ref().to_path_buf();
         let root = self.root.clone();
+        let packages = self.packages.clone();
+        let name = package_name.to_string();
+        let version = package_version.to_string();
 
         tokio::task::spawn_blocking(move || {
-            unpack_package(&path, &root, ConflictStrategy::Overwrite)
+            // Create package directory: $packages/<name>-<ver>/
+            let package_dir = packages.join(format!("{}-{}", name, version));
+            std::fs::create_dir_all(&package_dir)?;
+
+            // Unpack overlay to root, addition to package_dir
+            let filelist = unpack_package(&path, &root, &package_dir, ConflictStrategy::Overwrite)?;
+
+            // Generate filelist
+            let filelist_path = package_dir.join("filelist");
+            let filelist_content: String = filelist
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(&filelist_path, filelist_content)?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| TpmError::Repository(format!("Blocking task panicked: {}", e)))?
+    }
+
+    /// Uninstalls a package by removing all files listed in its filelist and the package directory.
+    ///
+    /// # Arguments
+    /// * `package_name` - Name of the package to uninstall
+    /// * `package_version` - Version of the package to uninstall
+    ///
+    /// # Behavior
+    /// 1. Reads `$packages/<name>-<ver>/filelist`
+    /// 2. Removes each file listed in the filelist from `$root`
+    /// 3. Removes the entire `$packages/<name>-<ver>/` directory
+    ///
+    /// # Notes
+    /// - Files that no longer exist are silently skipped
+    /// - Parent directories are NOT removed (they may contain files from other packages)
+    /// - Returns an error if the package directory does not exist
+    pub async fn uninstall_package(
+        &self,
+        package_name: &str,
+        package_version: &str,
+    ) -> Result<(), TpmError> {
+        let root = self.root.clone();
+        let packages = self.packages.clone();
+        let name = package_name.to_string();
+        let version = package_version.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let package_dir = packages.join(format!("{}-{}", name, version));
+            let filelist_path = package_dir.join("filelist");
+
+            if !package_dir.exists() {
+                return Err(TpmError::PackageNotFound(name, version));
+            }
+
+            if filelist_path.exists() {
+                let content = std::fs::read_to_string(&filelist_path)?;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let file_path = PathBuf::from(line);
+
+                    if !is_path_safe(&file_path) {
+                        eprintln!(
+                            "Warning: skipping unsafe path in filelist: {}",
+                            file_path.display()
+                        );
+                        continue;
+                    }
+
+                    let full_path = root.join(&file_path);
+
+                    if full_path.exists() {
+                        if full_path.is_file() {
+                            if let Err(e) = std::fs::remove_file(&full_path) {
+                                eprintln!(
+                                    "Warning: failed to remove {}: {}",
+                                    full_path.display(),
+                                    e
+                                );
+                            }
+                        } else {
+                            eprintln!("Warning: {} is not a file, skipping", full_path.display());
+                        }
+                    }
+                }
+            }
+
+            std::fs::remove_dir_all(&package_dir)?;
+
+            Ok(())
         })
         .await
         .map_err(|e| TpmError::Repository(format!("Blocking task panicked: {}", e)))?
