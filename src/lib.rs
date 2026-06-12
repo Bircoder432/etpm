@@ -1,3 +1,29 @@
+//! # ETPM — Embeddable Tiny Package Manager
+//!
+//! Small, embeddable Rust library to securely download, verify and install self-contained package
+//! archives from HTTP repositories. ETPM focuses on a minimal, auditable workflow rather than
+//! full OS package management or dependency resolution.
+//!
+//! Key features:
+//! - Structured archives with `package/overlay` and `package/addition` trees.
+//! - Ed25519 signature verification (Base64 `.sig` files) against configured trusted public keys.
+//! - Safe unpacking with protection against Path Traversal (Tar Slip) attacks.
+//! - Asynchronous API powered by `tokio` and typed errors via `thiserror`.
+//! - Optional C FFI (`cdylib`) for embedding in other languages (header: `etpm.h`).
+//! - Library uses `tracing` for instrumentation; applications should initialize a global subscriber.
+//!
+//! Basic example (async, ignored for doctest compilation):
+//!
+//! ```rust,ignore
+//! use etpm::PackageManager;
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // initialize logging in the application (not in the library)
+//!     tracing_subscriber::fmt()
+//!         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+//!         .init();
+//!
+//!     let mut manager = PackageManager::new();
 //!     manager.set_root("./root")?;
 //!     manager.set_packages("./packages")?;
 //!     manager.add_repository("https://repo.example.com/")?;
@@ -25,7 +51,7 @@
 //! }
 //! ```
 //!
-//! C FFI (see `etpm.h`):
+//! C FFI example (non-rust code block):
 //!
 //! ```c
 //! #include "etpm.h"
