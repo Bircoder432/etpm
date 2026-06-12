@@ -74,6 +74,15 @@ void etpm_free_string(char* str);
 /// Frees a byte buffer allocated by the ETPM library.
 void etpm_free_buffer(uint8_t* buffer, size_t len);
 
+EtpmStatus etpm_fetch_addition_file(
+    EtpmManager* manager,
+    const char* package_name,
+    const char* version,
+    const char* addition_name,
+    uint8_t** out_data,
+    size_t* out_len
+);
+
 #ifdef __cplusplus
 }
 #endif

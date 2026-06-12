@@ -390,3 +390,51 @@ pub extern "C" fn etpm_get_last_error(ptr: *mut EtpmManager) -> *mut c_char {
         None => std::ptr::null_mut(),
     }
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn etpm_fetch_addition_file(
+    ptr: *mut EtpmManager,
+    name: *const c_char,
+    version: *const c_char,
+    addition_name: *const c_char,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+) -> EtpmStatus {
+    if ptr.is_null() || out_data.is_null() || out_len.is_null() {
+        return EtpmStatus::EtpmErrNullPtr;
+    }
+
+    let manager = unsafe { &*ptr };
+    let (n, v, a) = match (
+        c_str_to_str(name),
+        c_str_to_str(version),
+        c_str_to_str(addition_name),
+    ) {
+        (Ok(n), Ok(v), Ok(a)) => (n, v, a),
+        (_, _, Err(e)) | (_, Err(e), _) | (Err(e), _, _) => return e,
+    };
+
+    info!("FFI: fetch_addition_file request {}@{} -> {}", n, v, a);
+
+    let result = manager
+        .runtime
+        .block_on(async { manager.manager.fetch_addition_file(n, v, a).await });
+
+    match result {
+        Ok(data) => {
+            let boxed_slice = data.into_boxed_slice();
+            let len = boxed_slice.len();
+            let ptr = Box::into_raw(boxed_slice) as *mut u8;
+            unsafe {
+                *out_data = ptr;
+                *out_len = len;
+            }
+            EtpmStatus::EtpmOk
+        }
+        Err(e) => {
+            error!("FFI: fetch_addition_file failed: {}", e);
+            *manager.last_error.lock().unwrap() = Some(e.to_string());
+            (&e).into()
+        }
+    }
+}

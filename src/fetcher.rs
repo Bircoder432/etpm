@@ -14,6 +14,8 @@ use tracing::{debug, error, info, warn};
 pub struct PackageVersion {
     pub version: String,
     pub url: String,
+    #[serde(default)]
+    pub additions: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

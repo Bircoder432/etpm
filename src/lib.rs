@@ -1,3 +1,54 @@
+//!     manager.set_root("./root")?;
+//!     manager.set_packages("./packages")?;
+//!     manager.add_repository("https://repo.example.com/")?;
+//!     manager.add_trusted_key("BASE64_PUBLIC_KEY==")?;
+//!
+//!     // download (and verify) package
+//!     let pkg = manager.fetch_package("my-app", "1.0.0", "./downloads").await?;
+//!
+//!     // install
+//!     manager.install_package(&pkg, "my-app", "1.0.0").await?;
+//!
+//!     // check for updates
+//!     if manager.check_update("my-app", "1.0.0").await? {
+//!         println!("Update available");
+//!     }
+//!
+//!     // get latest version string
+//!     if let Some(latest) = manager.get_latest_version("my-app").await? {
+//!         println!("Latest version: {}", latest);
+//!     }
+//!
+//!     // uninstall
+//!     manager.uninstall_package("my-app", "1.0.0").await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! C FFI (see `etpm.h`):
+//!
+//! ```c
+//! #include "etpm.h"
+//!
+//! int main() {
+//!   EtpmManager* m = etpm_manager_new();
+//!   etpm_set_root(m, "/opt/my-app");
+//!   etpm_set_packages(m, "/var/lib/etpm");
+//!   etpm_add_repository(m, "https://repo.example.com/");
+//!   etpm_add_trusted_key(m, "BASE64_PUBLIC_KEY==");
+//!   char* path = NULL;
+//!   EtpmStatus s = etpm_fetch_package(m, "my-app", "1.0.0", "/tmp", &path);
+//!   if (s == ETPM_OK) {
+//!     etpm_install_package(m, path, "my-app", "1.0.0");
+//!     etpm_free_string(path);
+//!   }
+//!   etpm_manager_free(m);
+//!   return 0;
+//! }
+//! ```
+//!
+//! Note: the library emits `tracing` events but does not install a global subscriber. Initialize
+//! `tracing_subscriber` in your application to see logs and control filtering (e.g. via RUST_LOG).
 use ed25519_dalek::VerifyingKey;
 use flate2::read::GzDecoder;
 use std::collections::HashMap;
@@ -81,7 +132,7 @@ impl PackageManager {
         .map_err(|e| {
             error!("Invalid key format: {}", e);
             TpmError::InvalidSignature
-        })?; // Или можно сделать отдельную ошибку InvalidKeyFormat
+        })?; // Or create a separate InvalidKeyFormat error
 
         let verifying_key = VerifyingKey::try_from(key_bytes.as_slice()).map_err(|e| {
             error!("Invalid key format: {}", e);
@@ -155,6 +206,59 @@ impl PackageManager {
         cache.insert(repo.clone(), index.clone());
         debug!("Cache miss: {}", repo);
         Ok(index)
+    }
+
+    /// Fetches a specific addition file directly from the repository without downloading the whole package.
+    /// The `addition_name` is the stem of the file (e.g., "metadata" for "metadata.ron" or "metadata.json").
+    pub async fn fetch_addition_file(
+        &self,
+        package_name: &str,
+        version: &str,
+        addition_name: &str,
+    ) -> Result<Vec<u8>, TpmError> {
+        info!(
+            "Fetching addition '{}' for {}@{}",
+            addition_name, package_name, version
+        );
+
+        for repo in &self.repositories {
+            let index = self.get_index(repo).await?;
+
+            if let Some(versions) = index.packages.get(package_name) {
+                if let Some(pkg_version) = versions.iter().find(|v| v.version == version) {
+                    if let Some(addition_url) = pkg_version.additions.get(addition_name) {
+                        let full_url = repo.join(addition_url).map_err(|e| {
+                            error!("Invalid addition URL: {}", e);
+                            TpmError::Repository(format!("Invalid addition URL: {}", e))
+                        })?;
+
+                        info!("Downloading addition directly from: {}", full_url);
+                        let response = reqwest::get(full_url).await?;
+
+                        if !response.status().is_success() {
+                            error!("Failed to fetch addition: HTTP {}", response.status());
+                            return Err(TpmError::Repository(format!(
+                                "Failed to fetch addition: {}",
+                                response.status()
+                            )));
+                        }
+
+                        let bytes = response.bytes().await?.to_vec();
+                        info!("Successfully fetched addition '{}'", addition_name);
+                        return Ok(bytes);
+                    }
+                }
+            }
+        }
+
+        error!(
+            "Addition '{}' not found for {}@{}",
+            addition_name, package_name, version
+        );
+        Err(TpmError::AdditionFileNotFound(format!(
+            "{} for {}@{}",
+            addition_name, package_name, version
+        )))
     }
 
     pub async fn fetch_package(
