@@ -1,6 +1,6 @@
 [package]
 name = "etpm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Vadim Storozhilov"]
 description = "ETPM — a tiny, embeddable package manager library for Rust focused on downloading and installing tar.gz package archives from HTTP repositories."

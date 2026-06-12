@@ -26,7 +26,7 @@ ETPM (crate name: `etpm`) is a small, embeddable package manager library for Rus
 From crates.io (recommended once published):
 ```toml
 [dependencies]
-etpm = "0.1.0"
+etpm = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
